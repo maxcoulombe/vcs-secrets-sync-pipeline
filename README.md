@@ -9,6 +9,10 @@ chmod +x deploy.sh
 
 ## Invoke
 
+```
+aws lambda invoke --function-name hack-week-lambda --payload '{}' response.json
+```
+
 ## Teardown
 
 ```
