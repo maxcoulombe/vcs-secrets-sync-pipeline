@@ -18,7 +18,9 @@ data "aws_iam_policy_document" "hack_week_lambda" {
   version   = "2012-10-17"
   statement {
     effect  = "Allow"
-    actions = ["sts:AssumeRole"]
+    actions = [
+      "sts:AssumeRole"
+    ]
 
     principals {
       type        = "Service"
@@ -27,9 +29,27 @@ data "aws_iam_policy_document" "hack_week_lambda" {
   }
 }
 
+data "aws_iam_policy_document" "hack_week_lambda_mq" {
+  policy_id = "${local.name}-lambd-mq"
+  version   = "2012-10-17"
+
+  statement {
+    actions = [
+      "mq:CreateUser",
+      "mq:UpdateUser"
+    ]
+
+    resources = ["*"]
+  }
+}
+
 resource "aws_iam_role" "hack_week_lambda" {
   name                = "${local.name}-lambda"
   assume_role_policy  = data.aws_iam_policy_document.hack_week_lambda.json
+  inline_policy {
+    name = "mq-access"
+    policy = data.aws_iam_policy_document.hack_week_lambda_mq.json
+  }
 }
 
 resource "aws_lambda_function" "func" {
