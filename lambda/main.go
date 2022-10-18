@@ -2,37 +2,45 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"time"
+
+	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/mq"
 	"github.com/hashicorp/go-secure-stdlib/awsutil"
 	"github.com/thanhpk/randstr"
-	"log"
+
 	"pack.ag/amqp"
 )
 
-// Get these from the Terraform run
-const (
-	brokerId        = "b-5612de2f-d7b4-4479-9612-e1627518c444"
-	currentUsername = "potato"
-)
-
-type Step int
+type Step string
 
 const (
-	Create Step = iota
-	Set
-	Test
-	Finalise
+	Create   Step = "CREATE"
+	Set      Step = "SET"
+	Test     Step = "TEST"
+	Finalise Step = "FINALISE"
 )
+
+type LambdaEvent struct {
+	Body string `json:"body"`
+}
 
 type Event struct {
-	PreviousUsername string `json:"previousUsername"`
-	Username         string `json:"username"`
-	Password         string `json:"password"`
+	PreviousUsername string `json:"previousUsername,omitempty"`
+	Username         string `json:"username,omitempty"`
+	Password         string `json:"password,omitempty"`
 	BrokerId         string `json:"brokerId"`
 	Step             Step   `json:"step"`
+}
+
+type LambdaResponse struct {
+	IsBase64Encoded bool   `json:"isBase64Encoded"`
+	StatusCode      int    `json:"statusCode"`
+	Body            string `json:"body"`
 }
 
 type Response struct {
@@ -72,7 +80,7 @@ func handleCreateStep(ctx context.Context, event Event, mqClient *mq.MQ) (Respon
 		Username: aws.String(generatedUsername),
 		Password: aws.String(generatedPassword)})
 	if err != nil {
-		return Response{Success: false}, fmt.Errorf("unexpected error while trying to create user %s on broker %s", event.Username, event.BrokerId)
+		return Response{Success: false}, fmt.Errorf("unexpected error while trying to create user on broker %s: %w", event.BrokerId, err)
 	} else {
 		return Response{
 			Success:     true,
@@ -83,30 +91,36 @@ func handleCreateStep(ctx context.Context, event Event, mqClient *mq.MQ) (Respon
 }
 
 func handleSetStep(ctx context.Context, event Event, mqClient *mq.MQ) (Response, error) {
-	_, err := mqClient.UpdateUserWithContext(ctx, &mq.UpdateUserRequest{
+	if event.Username != "" && event.Password != "" {
+		_, err := mqClient.CreateUserWithContext(ctx, &mq.CreateUserRequest{
+			BrokerId: aws.String(event.BrokerId),
+			Username: aws.String(event.Username),
+			Password: aws.String(event.Password),
+		})
+		if err != nil {
+			return Response{Success: false}, fmt.Errorf("unexpected error while trying to update user %s on broker %s: %w", event.Username, event.BrokerId, err)
+		}
+	}
+
+	_, err := mqClient.RebootBrokerWithContext(ctx, &mq.RebootBrokerInput{
 		BrokerId: aws.String(event.BrokerId),
-		Username: aws.String(event.Username),
-		Password: aws.String(event.Password),
 	})
 	if err != nil {
-		return Response{Success: false}, fmt.Errorf("unexpected error while trying to update user %s on broker %s", event.Username, event.BrokerId)
+		return Response{Success: false}, fmt.Errorf("unexpected error while trying to update user %s on broker %s: %w", event.Username, event.BrokerId, err)
 	} else {
-		return Response{
-			Success:     true,
-			NewUsername: event.Username,
-			NewPassword: event.Password,
-		}, nil
+		return Response{Success: true}, nil
 	}
 }
 
 func handleTestStep(event Event, region string) (Response, error) {
-	client, err := amqp.Dial(fmt.Sprintf("amqps://%s-1.mq.%s.amazonaws.com:5671", event.BrokerId, region),
+	_, err := amqp.Dial(fmt.Sprintf("amqps://%s-1.mq.%s.amazonaws.com:5671", event.BrokerId, region),
 		amqp.ConnSASLPlain(event.Username, event.Password),
+		amqp.ConnConnectTimeout(5*time.Second),
 	)
-	defer client.Close()
 
 	if err != nil {
-		return Response{Success: false}, fmt.Errorf("unable to connect to broker %s with the provided credentials", event.BrokerId)
+		return Response{Success: false}, fmt.Errorf(
+			"unable to connect to broker %s with the provided credentials: %w", event.BrokerId, err)
 	} else {
 		return Response{Success: true}, nil
 	}
@@ -118,77 +132,63 @@ func handleFinalizeStep(ctx context.Context, event Event, mqClient *mq.MQ) (Resp
 		Username: aws.String(event.PreviousUsername),
 	})
 	if err != nil {
-		return Response{Success: false}, fmt.Errorf("unexpected error while trying to delete user %s on broker %s", event.Username, event.BrokerId)
+		return Response{Success: false}, fmt.Errorf("unexpected error while trying to delete previous user %s on broker %s: %w", event.PreviousUsername, event.BrokerId, err)
 	} else {
 		return Response{Success: true}, nil
 	}
 }
 
-func handleRequest(ctx context.Context, event Event) (Response, error) {
-	mqClient, region, err := createMQClient()
+func handleRequest(ctx context.Context, event LambdaEvent) (LambdaResponse, error) {
+	e := Event{}
+	err := json.Unmarshal([]byte(event.Body), &e)
 	if err != nil {
-		return Response{Success: false}, fmt.Errorf("unable to create MQ client: %w", err)
+		return LambdaResponse{
+			StatusCode: 500,
+		}, fmt.Errorf("unable to parse event: %v", event.Body)
 	}
 
-	switch event.Step {
-	case Create:
-		return handleCreateStep(ctx, event, mqClient)
-	case Set:
-		return handleSetStep(ctx, event, mqClient)
-	case Test:
-		return handleTestStep(event, region)
-	case Finalise:
-		return handleFinalizeStep(ctx, event, mqClient)
-	default:
-		return Response{Success: true}, fmt.Errorf("step %v is not supported", event.Step)
+	mqClient, region, err := createMQClient()
+	if err != nil {
+		return LambdaResponse{
+			StatusCode: 500,
+		}, fmt.Errorf("unable to create MQ client: %s", event.Body)
 	}
+
+	r := Response{}
+	switch e.Step {
+	case Create:
+		r, err = handleCreateStep(ctx, e, mqClient)
+		break
+	case Set:
+		r, err = handleSetStep(ctx, e, mqClient)
+		break
+	case Test:
+		r, err = handleTestStep(e, region)
+		break
+	case Finalise:
+		r, err = handleFinalizeStep(ctx, e, mqClient)
+		break
+	default:
+		return LambdaResponse{
+			StatusCode: 500,
+		}, fmt.Errorf("step %v is not supported", e.Step)
+	}
+	if err != nil {
+		return LambdaResponse{
+			StatusCode: 500,
+		}, fmt.Errorf("error handling request: %w", err)
+	}
+
+	body, err := json.Marshal(r)
+	if err != nil {
+		return LambdaResponse{
+			StatusCode: 500,
+		}, fmt.Errorf("unable to marshal response body: %w", err)
+	}
+
+	return LambdaResponse{StatusCode: 200, Body: string(body)}, err
 }
 
 func main() {
-	// Uncomment to run locally
-	ctx := context.Background()
-
-	event := Event{
-		BrokerId: brokerId,
-		Step:     Create,
-	}
-	r, err := handleRequest(ctx, event)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	event = Event{
-		Username: r.NewUsername,
-		Password: r.NewPassword,
-		BrokerId: brokerId,
-		Step:     Set,
-	}
-	r, err = handleRequest(ctx, event)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	event = Event{
-		Username: r.NewUsername,
-		Password: r.NewPassword,
-		BrokerId: brokerId,
-		Step:     Test,
-	}
-	r, err = handleRequest(ctx, event)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	event = Event{
-		PreviousUsername: currentUsername,
-		BrokerId:         brokerId,
-		Step:             Finalise,
-	}
-	r, err = handleRequest(ctx, event)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// Uncomment when running on AWS
-	//lambda.Start(handleRequest)
+	lambda.Start(handleRequest)
 }

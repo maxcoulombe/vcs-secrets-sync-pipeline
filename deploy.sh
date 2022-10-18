@@ -5,6 +5,7 @@ rm -rf ./bin
 
 cd lambda
 go test ./...
+go mod tidy
 env GOOS=linux GOARCH=amd64 go build -o ./bin/hack-week-lambda
 cd ../
 

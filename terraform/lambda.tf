@@ -1,7 +1,6 @@
 provider "aws" {}
 
 locals {
-  environment     = "dev"
   lambda_handler  = "hack-week-lambda"
   name            = "hack-week-lambda"
   region          = "us-east-1"
@@ -36,10 +35,12 @@ data "aws_iam_policy_document" "hack_week_lambda_mq" {
   statement {
     actions = [
       "mq:CreateUser",
-      "mq:UpdateUser"
+      "mq:UpdateUser",
+      "mq:DeleteUser",
+      "mq:RebootBroker",
     ]
 
-    resources = ["*"]
+    resources = [aws_mq_broker.hack_week_active_mq.arn]
   }
 }
 
@@ -52,7 +53,7 @@ resource "aws_iam_role" "hack_week_lambda" {
   }
 }
 
-resource "aws_lambda_function" "func" {
+resource "aws_lambda_function" "hack_week_lambda" {
   filename          = data.archive_file.hack_week_lambda.output_path
   function_name     = local.name
   role              = aws_iam_role.hack_week_lambda.arn
@@ -61,10 +62,4 @@ resource "aws_lambda_function" "func" {
   runtime           = "go1.x"
   memory_size       = 1024
   timeout           = 30
-
-  environment {
-    variables = {
-      test = true
-    }
-  }
 }
