@@ -1,4 +1,4 @@
-# vault-hack-week-lambda
+# vcs-secrets-sync-pipeline
 
 ## Setup
 

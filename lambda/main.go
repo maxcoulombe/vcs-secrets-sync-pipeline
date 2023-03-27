@@ -2,207 +2,154 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log"
+
+	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
-	"strings"
-
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/mq"
-	"github.com/hashicorp/go-secure-stdlib/awsutil"
-	"github.com/thanhpk/randstr"
+	"github.com/hashicorp/eventlogger"
+	"github.com/hashicorp/secrets-store-syncer/sinkers/store"
+	"github.com/hashicorp/secrets-store-syncer/syncer"
 )
-
-type Step string
 
 const (
-	Create   Step = "create"
-	Set      Step = "set"
-	Test     Step = "test"
-	Finalize Step = "finalize"
+	FormatterNodeName = "formatter"
+	StoreNodeName     = "store"
+	PipelineID        = "vcs-secrets-sync-pipeline"
+	EventType         = "vcs-secrets-sync-event"
+	GlobalTagKey      = "hashicorp:vcs:secret"
+	SecretKeyPattern  = "hashicorp/vcs/%s/%s"
 )
 
-type Event struct {
-	Stage          Step        `json:"stage"`
-	StaticInput    StaticInput `json:"static_input,omitempty"`
-	CurrentVersion Secret      `json:"current_version,omitempty"`
-	NextVersion    Secret      `json:"next_version,omitempty"`
-	SecretPath     string      `json:"secret_path,omitempty"`
+type SecretsWriteEvent struct {
+	OrgId           string           `json:"org_id"`
+	ProjId          string           `json:"proj_id"`
+	AppName         string           `json:"app_name"`
+	SecretName      string           `json:"secret_name"`
+	IntegrationType string           `json:"integration_type"`
+	IntegrationName string           `json:"integration_name"`
+	Operation       syncer.Operation `json:"operation"`
 }
 
-type Response struct {
-	Error       string `json:"error,omitempty"`
-	NextVersion Secret `json:"next_version,omitempty"`
-}
+func parseEvent(sqsEvent events.SQSEvent) ([]*SecretsWriteEvent, error) {
+	var secretsWriteEvents []*SecretsWriteEvent
 
-type StaticInput struct {
-	BrokerId string `json:"broker_id,omitempty"`
-}
+	for _, record := range sqsEvent.Records {
+		var secretsWriteEvent *SecretsWriteEvent
 
-type Secret struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-}
+		err := json.Unmarshal([]byte(record.Body), &secretsWriteEvent)
+		if err != nil {
+			log.Printf(fmt.Errorf("ERROR: %w", err).Error())
+			return nil, err
+		}
+		log.Printf("SECRET EVENT: %+v\n", secretsWriteEvent)
 
-func createMQClient() (*mq.MQ, error) {
-	creds, err := awsutil.RetrieveCreds("", "", "", nil)
-	if err != nil {
-		return nil, fmt.Errorf("unable to rerieve AWS credentials from provider chain: %w", err)
+		secretsWriteEvents = append(secretsWriteEvents, secretsWriteEvent)
 	}
 
-	region, err := awsutil.GetRegion("")
+	return secretsWriteEvents, nil
+}
+
+// TODO Get this from the Tokenization service
+func getSecretValue(event *SecretsWriteEvent) (string, error) {
+	return "test", nil
+}
+
+// TODO Add a cache to reuse the syncer between lambda invocations
+func getOrInitStore(event *SecretsWriteEvent) (*syncer.SecretsSyncer, error) {
+	connDetails, err := getConnectionDetails(event)
 	if err != nil {
-		return nil, fmt.Errorf("unable to determine AWS region from config nor context: %w", err)
+
 	}
 
-	sess, err := session.NewSession(&aws.Config{
-		Region:      aws.String(region),
-		Credentials: creds,
+	return initStoreSinker(event, connDetails)
+}
+
+// TODO Get this from the Tokenization service
+// For now just hardcode your credentials for local tests
+func getConnectionDetails(event *SecretsWriteEvent) (map[string]any, error) {
+	return map[string]any{}, nil
+}
+
+func initStoreSinker(event *SecretsWriteEvent, connDetails map[string]any) (*syncer.SecretsSyncer, error) {
+	sync := syncer.NewSyncer()
+
+	err := sync.RegisterNode(FormatterNodeName, syncer.NewMetadataFormatter(
+		map[string]string{GlobalTagKey: ""},
+		"Source: <HCP URL>",
+		"",
+	))
+	if err != nil {
+		log.Printf(fmt.Errorf("ERROR: %w", err).Error())
+		return nil, err
+	}
+
+	err = store.CreateAndRegisterStore(sync, StoreNodeName, store.Type(event.IntegrationType), connDetails)
+	if err != nil {
+		log.Printf(fmt.Errorf("ERROR: %w", err).Error())
+		return nil, err
+	}
+
+	err = sync.RegisterPipeline(eventlogger.Pipeline{
+		PipelineID: PipelineID,
+		EventType:  EventType,
+		NodeIDs: []eventlogger.NodeID{
+			FormatterNodeName,
+			StoreNodeName,
+		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("unable to initialize AWS session: %w", err)
+		log.Printf(fmt.Errorf("ERROR: %w", err).Error())
+		return nil, err
 	}
 
-	return mq.New(sess), nil
+	return sync, nil
 }
 
-func handleCreateStep(ctx context.Context, event Event, mqClient *mq.MQ) (Response, error) {
-	generatedUsername := randstr.Hex(16)
-	generatedPassword := randstr.Hex(16)
-
-	_, err := mqClient.CreateUserWithContext(ctx, &mq.CreateUserRequest{
-		BrokerId: aws.String(event.StaticInput.BrokerId),
-		Username: aws.String(generatedUsername),
-		Password: aws.String(generatedPassword)})
+// TODO Reach back to the Secrets-Service with the sync result
+func reportSecretSyncStatus(event *SecretsWriteEvent, err error) error {
 	if err != nil {
-		err = fmt.Errorf("unexpected error while trying to create user on broker %s: %w", event.StaticInput.BrokerId, err)
-		return Response{Error: err.Error()}, err
-	} else {
-		return Response{
-			NextVersion: Secret{
-				Username: generatedUsername,
-				Password: generatedPassword,
-			},
-		}, nil
+		log.Printf(fmt.Errorf("ERROR: %w", err).Error())
 	}
+
+	return err
 }
 
-func handleSetStep(ctx context.Context, event Event, mqClient *mq.MQ) (Response, error) {
-	_, err := mqClient.CreateUserWithContext(ctx, &mq.CreateUserRequest{
-		BrokerId: aws.String(event.StaticInput.BrokerId),
-		Username: aws.String(event.NextVersion.Username),
-		Password: aws.String(event.NextVersion.Password),
-	})
-	if err != nil && strings.Contains(err.Error(), "already exists") {
-		// It's ok
-	} else if err != nil {
-		err = fmt.Errorf("unexpected error while trying to update user on broker %s: %w", event.StaticInput.BrokerId, err)
-		return Response{Error: err.Error()}, err
-	}
-
-	_, err = mqClient.RebootBrokerWithContext(ctx, &mq.RebootBrokerInput{
-		BrokerId: aws.String(event.StaticInput.BrokerId),
-	})
-	if err != nil && strings.Contains(err.Error(), "REBOOT_IN_PROGRESS") {
-		// It's ok
-	} else if err != nil {
-		err = fmt.Errorf("unexpected error while trying to update user on broker %s: %w", event.StaticInput.BrokerId, err)
-		return Response{Error: err.Error()}, err
-	}
-
-	return Response{NextVersion: Secret{
-		Username: event.NextVersion.Username,
-		Password: event.NextVersion.Password,
-	}}, nil
-
-}
-
-func handleTestStep(_ context.Context, event Event, _ *mq.MQ) (Response, error) {
-	// If you want to use the real Test
-	//_, err := amqp.Dial(fmt.Sprintf("amqps://%s-1.mq.%s.amazonaws.com:5671", event.BrokerId, region),
-	//	amqp.ConnSASLPlain(event.Username, event.Password),
-	//	amqp.ConnConnectTimeout(5*time.Second),
-	//)
-
-	// If you want to succeed 10% of the time to test a retry mechanism
-	//success := rand.Intn(100)%10 == 0
-	//if !success {
-	//	err := fmt.Errorf("unable to connect to broker %s with the provided credentials", event.StaticInput.BrokerId)
-	//	return Response{Error: err.Error()}, err
-	//} else {
-	//	return Response{NextVersion: Secret{
-	//		Username: event.NextVersion.Username,
-	//		Password: event.NextVersion.Password,
-	//	}}, nil
-	//}
-
-	// Short-circuiting to success
-	return Response{NextVersion: Secret{
-		Username: event.NextVersion.Username,
-		Password: event.NextVersion.Password,
-	}}, nil
-}
-
-func handleFinalizeStep(ctx context.Context, event Event, mqClient *mq.MQ) (Response, error) {
-	if event.CurrentVersion.Username == "" {
-		return Response{NextVersion: Secret{
-			Username: event.NextVersion.Username,
-			Password: event.NextVersion.Password,
-		}}, nil
-	}
-
-	_, err := mqClient.DeleteUserWithContext(ctx, &mq.DeleteUserInput{
-		BrokerId: aws.String(event.StaticInput.BrokerId),
-		Username: aws.String(event.CurrentVersion.Username),
-	})
+func handleRequest(ctx context.Context, sqsEvent events.SQSEvent) error {
+	secretWriteEvents, err := parseEvent(sqsEvent)
 	if err != nil {
-		err = fmt.Errorf("unexpected error while trying to delete previous user on broker %s: %w", event.StaticInput.BrokerId, err)
-		return Response{Error: err.Error()}, err
-	} else {
-		return Response{NextVersion: Secret{
-			Username: event.NextVersion.Username,
-			Password: event.NextVersion.Password,
-		}}, nil
-	}
-}
-
-func handleRequest(ctx context.Context, event Event) (Response, error) {
-	mqClient, err := createMQClient()
-	if err != nil {
-		err = fmt.Errorf("unable to create MQ client: %w", err)
-		return Response{
-			Error: err.Error(),
-		}, err
+		log.Printf(fmt.Errorf("ERROR: %w", err).Error())
+		return err
 	}
 
-	r := Response{}
-	switch event.Stage {
-	case Create:
-		r, err = handleCreateStep(ctx, event, mqClient)
-		break
-	case Set:
-		r, err = handleSetStep(ctx, event, mqClient)
-		break
-	case Test:
-		r, err = handleTestStep(ctx, event, mqClient)
-		break
-	case Finalize:
-		r, err = handleFinalizeStep(ctx, event, mqClient)
-		break
-	default:
-		err = fmt.Errorf("stage %v is not supported", event.Stage)
-		return Response{
-			Error: err.Error(),
-		}, err
+	for _, event := range secretWriteEvents {
+		secretValue, err := getSecretValue(event)
+		if err != nil {
+			return reportSecretSyncStatus(event, err)
+		}
+
+		syncEvent := syncer.SecretSyncEvent{
+			Key:       fmt.Sprintf(SecretKeyPattern, event.AppName, event.SecretName),
+			Value:     secretValue,
+			Operation: event.Operation,
+		}
+		log.Printf("SYNC EVENT: %+v\n", syncEvent)
+
+		sinker, err := getOrInitStore(event)
+		if err != nil {
+			return reportSecretSyncStatus(event, err)
+		}
+
+		status, err := sinker.Send(ctx, EventType, syncEvent)
+		if err != nil || len(status.Warnings) != 0 {
+			return reportSecretSyncStatus(event, err)
+		}
+
+		_ = reportSecretSyncStatus(event, nil)
 	}
-	if err != nil {
-		err = fmt.Errorf("error handling request: %w", err)
-		return Response{
-			Error: err.Error(),
-		}, err
-	} else {
-		return r, nil
-	}
+
+	return nil
 }
 
 func main() {

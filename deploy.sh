@@ -6,7 +6,7 @@ rm -rf ./bin
 cd lambda
 go test ./...
 go mod tidy
-env GOOS=linux GOARCH=amd64 go build -o ./bin/hack-week-lambda
+env GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o ./bin/vcs-secrets-sync-pipeline
 cd ../
 
 cd terraform
