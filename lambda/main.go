@@ -23,13 +23,14 @@ const (
 )
 
 type SecretsWriteEvent struct {
-	OrgId           string           `json:"org_id"`
-	ProjId          string           `json:"proj_id"`
-	AppName         string           `json:"app_name"`
-	SecretName      string           `json:"secret_name"`
-	IntegrationType string           `json:"integration_type"`
-	IntegrationName string           `json:"integration_name"`
-	Operation       syncer.Operation `json:"operation"`
+	PublicTenantId   string           `json:"public_tenant_id"`
+	PrivateTenantId  string           `json:"private_tenant_id"`
+	AppName          string           `json:"app_name"`
+	SecretName       string           `json:"secret_name"`
+	SecretToken      string           `json:"secret_token"`
+	IntegrationType  string           `json:"integration_type"`
+	IntegrationToken string           `json:"integration_token"`
+	Operation        syncer.Operation `json:"operation"`
 }
 
 func parseEvent(sqsEvent events.SQSEvent) ([]*SecretsWriteEvent, error) {
@@ -67,7 +68,6 @@ func getOrInitStore(event *SecretsWriteEvent) (*syncer.SecretsSyncer, error) {
 }
 
 // TODO Get this from the Tokenization service
-// For now just hardcode your credentials for local tests
 func getConnectionDetails(event *SecretsWriteEvent) (map[string]any, error) {
 	return map[string]any{}, nil
 }
@@ -146,7 +146,11 @@ func handleRequest(ctx context.Context, sqsEvent events.SQSEvent) error {
 			return reportSecretSyncStatus(event, err)
 		}
 
-		_ = reportSecretSyncStatus(event, nil)
+		err = reportSecretSyncStatus(event, nil)
+		if err != nil {
+			log.Printf(fmt.Errorf("ERROR: %w", err).Error())
+			return err
+		}
 	}
 
 	return nil

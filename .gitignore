@@ -1,0 +1,11 @@
+# Executable
+lambda/bin/
+
+# Goland files
+.idea/*
+
+# Terraform temp files
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+terraform/.terraform/
+terraform/vcs-secrets-sync-pipeline.zip
