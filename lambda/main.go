@@ -136,15 +136,16 @@ func handleRequest(ctx context.Context, sqsEvent events.SQSEvent) error {
 		}
 		log.Printf("SYNC EVENT: %+v\n", syncEvent)
 
-		sinker, err := getOrInitStore(event)
-		if err != nil {
-			return reportSecretSyncStatus(event, err)
-		}
-
-		status, err := sinker.Send(ctx, EventType, syncEvent)
-		if err != nil || len(status.Warnings) != 0 {
-			return reportSecretSyncStatus(event, err)
-		}
+		// TODO Uncomment when credentials & secret are properly retrieved from the Tokenization service
+		//sinker, err := getOrInitStore(event)
+		//if err != nil {
+		//	return reportSecretSyncStatus(event, err)
+		//}
+		//
+		//status, err := sinker.Send(ctx, EventType, syncEvent)
+		//if err != nil || len(status.Warnings) != 0 {
+		//	return reportSecretSyncStatus(event, err)
+		//}
 
 		err = reportSecretSyncStatus(event, nil)
 		if err != nil {
