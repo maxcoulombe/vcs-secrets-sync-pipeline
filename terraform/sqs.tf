@@ -33,6 +33,7 @@ resource "aws_sqs_queue_redrive_allow_policy" "vcs_secrets_sync" {
 resource "aws_lambda_event_source_mapping" "vcs_secrets_sync" {
   event_source_arn = aws_sqs_queue.vcs_secrets_sync.arn
   function_name    = aws_lambda_function.vcs_secrets_sync.arn
+  batch_size       = 1
 }
 
 # Producer access

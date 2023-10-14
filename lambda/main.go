@@ -28,7 +28,7 @@ func handleRequest(_ context.Context, sqsEvent events.SQSEvent) error {
 
 		if event.GroupID == "error" {
 			time.Sleep(time.Second * 3)
-			return errors.New("oh no")
+			return errors.New("received message wants us to return an error")
 		} else {
 			time.Sleep(time.Second * 3)
 			log.Printf("SECRET EVENT: %+v\n", event)
